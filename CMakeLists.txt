@@ -96,6 +96,12 @@ define_property(GLOBAL PROPERTY apps_libraries
     FULL_DOCS "apps libraries"
 )
 
+# Libraries that should be linked into final firmware but are not app targets.
+define_property(GLOBAL PROPERTY firmware_link_libraries
+    BRIEF_DOCS "firmware link libraries"
+    FULL_DOCS "firmware link libraries"
+)
+
 # Add compilation options
 # TODO: Later can define configuration macros to enable/disable based on different projects
 set(CXX_STACK_PROTECTOR "-fstack-protector-all")
@@ -130,6 +136,110 @@ if(DEFINED UNIRTOS_EXTERNAL_APP_DIR)
         message(FATAL_ERROR "UNIRTOS_EXTERNAL_APP_DIR is set but CMakeLists.txt not found: ${UNIRTOS_EXTERNAL_APP_DIR}")
     endif()
 endif()
+
+# =========================================================================
+# External Libraries Support (SDK-integrated build)
+# =========================================================================
+# Libraries are discovered from env_config.json via UNIRTOS_LIBRARIES_JSON
+# and compiled as part of the SDK build process (like external apps)
+
+function(discover_and_link_external_libraries)
+    set(UNIRTOS_EXTERNAL_LIBRARY_TARGETS "" PARENT_SCOPE)
+    set_property(GLOBAL PROPERTY unirtos_external_library_targets "")
+
+    # Read libraries from UNIRTOS_LIBRARIES_JSON environment variable
+    if(NOT DEFINED ENV{UNIRTOS_LIBRARIES_JSON})
+        return()  # No libraries to process
+    endif()
+    
+    set(libraries_json "$ENV{UNIRTOS_LIBRARIES_JSON}")
+    if("${libraries_json}" STREQUAL "")
+        return()  # Empty library list
+    endif()
+    
+    # Resolve unirtos root (same logic as build.py)
+    # Priority: UNIRTOS_ROOT env var > HOME/.unirtos > defaults
+    set(unirtos_root)
+    if(DEFINED ENV{UNIRTOS_ROOT})
+        file(TO_CMAKE_PATH "$ENV{UNIRTOS_ROOT}" unirtos_root)
+    else()
+        if(WIN32)
+            # Windows: use USERPROFILE fallback
+            if(DEFINED ENV{USERPROFILE})
+                set(unirtos_root "$ENV{USERPROFILE}/.unirtos")
+            else()
+                set(unirtos_root "$ENV{HOME}/.unirtos")
+            endif()
+        else()
+            # Unix-like: use HOME/.unirtos
+            set(unirtos_root "$ENV{HOME}/.unirtos")
+        endif()
+    endif()
+    
+    get_filename_component(unirtos_root "${unirtos_root}" ABSOLUTE)
+    message(STATUS "[external-libs] root: ${unirtos_root}")
+    string(JSON libraries_count ERROR_VARIABLE libraries_json_error LENGTH "${libraries_json}")
+    if(NOT libraries_json_error STREQUAL "NOTFOUND")
+        message(FATAL_ERROR "Invalid UNIRTOS_LIBRARIES_JSON: ${libraries_json_error}")
+    endif()
+
+    if(libraries_count EQUAL 0)
+        return()
+    endif()
+
+    set(external_library_targets)
+    math(EXPR libraries_last_index "${libraries_count} - 1")
+    foreach(lib_index RANGE ${libraries_last_index})
+        string(JSON lib_name ERROR_VARIABLE lib_name_error GET "${libraries_json}" ${lib_index} name)
+        if(NOT lib_name_error STREQUAL "NOTFOUND")
+            message(FATAL_ERROR "Invalid library entry at index ${lib_index}: missing or invalid 'name'")
+        endif()
+
+        string(JSON lib_version ERROR_VARIABLE lib_version_error GET "${libraries_json}" ${lib_index} version)
+        if(NOT lib_version_error STREQUAL "NOTFOUND")
+            message(FATAL_ERROR "Invalid library entry at index ${lib_index}: missing or invalid 'version'")
+        endif()
+
+        set(lib_version_dir "v${lib_version}")
+        message(STATUS "[external-libs] discovered: ${lib_name}/${lib_version_dir}")
+
+        # Libraries are pulled by env-setup into ~/.unirtos/libraries/<lib_name>/v<lib_version>/
+        set(lib_source_dir "${unirtos_root}/libraries/${lib_name}/${lib_version_dir}")
+        set(lib_cmake "${lib_source_dir}/CMakeLists.txt")
+
+        if(EXISTS "${lib_cmake}")
+            message(STATUS "[external-libs] source: ${lib_source_dir}")
+
+            set(LIB_NAME "${lib_name}")
+            set(UNIRTOS_EXTERNAL_LIBRARY_NAME "${lib_name}")
+            set(UNIRTOS_EXTERNAL_LIBRARY_VERSION "${lib_version}")
+
+            # Output will be in: app_dir/qos_build/build/libs/<lib_name>/v<lib_version>/
+            add_subdirectory("${lib_source_dir}" "${CMAKE_CURRENT_BINARY_DIR}/libs/${lib_name}/${lib_version_dir}")
+
+            if(TARGET ${lib_name})
+                add_firmware_link_libraries($<TARGET_FILE:${lib_name}>)
+                list(APPEND external_library_targets ${lib_name})
+                message(STATUS "[firmware-link] registered external library target: ${lib_name}")
+            else()
+                message(FATAL_ERROR "External library '${lib_name}' must define a CMake target named '${lib_name}'")
+            endif()
+
+            unset(LIB_NAME)
+            unset(UNIRTOS_EXTERNAL_LIBRARY_NAME)
+            unset(UNIRTOS_EXTERNAL_LIBRARY_VERSION)
+        else()
+            message(WARNING "Library CMakeLists.txt not found: ${lib_cmake}, skipping")
+        endif()
+    endforeach()
+
+    list(REMOVE_DUPLICATES external_library_targets)
+    set_property(GLOBAL PROPERTY unirtos_external_library_targets "${external_library_targets}")
+    set(UNIRTOS_EXTERNAL_LIBRARY_TARGETS "${external_library_targets}" PARENT_SCOPE)
+endfunction()
+
+# Discover and configure external libraries early (before they're needed)
+discover_and_link_external_libraries()
 # App storage
 set(BINARY_BIN_DIR ${CMAKE_CURRENT_BINARY_DIR}/bin)
 #demo PATH
@@ -380,10 +490,14 @@ add_subdirectory_if_exist(qos_applications)
 set(target all_apps_libs)
 set(all_apps_libs_out ${out_unir_lib_dir}/all_apps_libs.ld)
 get_property(apps_libraries GLOBAL PROPERTY apps_libraries)
+get_property(firmware_link_libraries GLOBAL PROPERTY firmware_link_libraries)
+set(all_app_side_libraries ${apps_libraries} ${firmware_link_libraries})
+message(STATUS "[firmware-link] app libraries: ${apps_libraries}")
+message(STATUS "[firmware-link] external firmware libraries: ${firmware_link_libraries}")
 # Use python script to aggregate global libs together
 add_custom_command(OUTPUT ${all_apps_libs_out}
-    COMMAND ${py_exe} ${tools_dir}/python/groupgen.py --base ${BINARY_TOP_DIR} ${all_apps_libs_out} ${apps_libraries}
-    DEPENDS ${groupgen_py} ${apps_libraries}
+    COMMAND ${py_exe} ${tools_dir}/python/groupgen.py --base ${BINARY_TOP_DIR} ${all_apps_libs_out} ${all_app_side_libraries}
+    DEPENDS ${groupgen_py} ${all_app_side_libraries}
     WORKING_DIRECTORY ${BINARY_TOP_DIR}
 )
 add_custom_target(build_${target} DEPENDS ${all_apps_libs_out})
