@@ -99,6 +99,31 @@ set(CXX_FLAGS_DEBUG "-Os")
 set(SOURCE_TOP_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 set(BINARY_TOP_DIR ${CMAKE_CURRENT_BINARY_DIR})
 set(out_inc_dir ${CMAKE_CURRENT_BINARY_DIR}/include)
+# Optional external app injection (SDK-driven build from user app dir)
+if(NOT DEFINED UNIRTOS_EXTERNAL_APP_DIR)
+    if(DEFINED ENV{UNIRTOS_EXTERNAL_APP_DIR} AND NOT "$ENV{UNIRTOS_EXTERNAL_APP_DIR}" STREQUAL "")
+        set(UNIRTOS_EXTERNAL_APP_DIR "$ENV{UNIRTOS_EXTERNAL_APP_DIR}")
+    endif()
+endif()
+
+if(NOT DEFINED UNIRTOS_EXTERNAL_APP_NAME)
+    if(DEFINED ENV{UNIRTOS_EXTERNAL_APP_NAME} AND NOT "$ENV{UNIRTOS_EXTERNAL_APP_NAME}" STREQUAL "")
+        set(UNIRTOS_EXTERNAL_APP_NAME "$ENV{UNIRTOS_EXTERNAL_APP_NAME}")
+    endif()
+endif()
+
+if(DEFINED UNIRTOS_EXTERNAL_APP_DIR)
+    file(TO_CMAKE_PATH "${UNIRTOS_EXTERNAL_APP_DIR}" UNIRTOS_EXTERNAL_APP_DIR)
+    get_filename_component(UNIRTOS_EXTERNAL_APP_DIR "${UNIRTOS_EXTERNAL_APP_DIR}" ABSOLUTE)
+    if(EXISTS ${UNIRTOS_EXTERNAL_APP_DIR}/CMakeLists.txt)
+        if(NOT DEFINED UNIRTOS_EXTERNAL_APP_NAME OR "${UNIRTOS_EXTERNAL_APP_NAME}" STREQUAL "")
+            get_filename_component(UNIRTOS_EXTERNAL_APP_NAME ${UNIRTOS_EXTERNAL_APP_DIR} NAME)
+        endif()
+        message(STATUS "INFO: External app mode enabled: ${UNIRTOS_EXTERNAL_APP_DIR}")
+    else()
+        message(FATAL_ERROR "UNIRTOS_EXTERNAL_APP_DIR is set but CMakeLists.txt not found: ${UNIRTOS_EXTERNAL_APP_DIR}")
+    endif()
+endif()
 # App storage
 set(BINARY_BIN_DIR ${CMAKE_CURRENT_BINARY_DIR}/bin)
 #demo PATH
@@ -131,25 +156,15 @@ set(TARGET_CONFIG ${BINARY_TOP_DIR}/target.config)
 set(CHECK_CONFIG ${BINARY_TOP_DIR}/check.config)
 set(KCONFIG_MODEM ${QL_COMPONENTS_DIR}/system/modem/Kconfig.modem)
 set(QOS_APPLICATIONS_DIR ${QL_DEMO_DIR})
-set(APP_INIT_ENTRIES ${QOS_APPLICATIONS_DIR}/app_init/apps_init_entries.def)
-resolve_builtin_demo_selection(
-    ${QOS_APPLICATIONS_DIR}
-    ${APP_INIT_ENTRIES}
-    ${build_arch}
-    ${BINARY_TOP_DIR}/qos_applications
-    ${py_exe}
-    ${tools_dir}
-    ${UNIRTOS_DIR}
-)
+# Independent external app flow does not rely on builtin demo manifest/depend mechanism.
+set(SELECTED_APP_DEMO_DEPEND_CONFIGS)
+set(SELECTED_APP_DEMO_CONFIGURE_DEPENDS)
 
 collect_qos_application_projects(${QOS_APPLICATIONS_DIR} EXTERNAL_QOS_APPLICATION_DIRS)
+if(DEFINED UNIRTOS_EXTERNAL_APP_DIR)
+    list(APPEND EXTERNAL_QOS_APPLICATION_DIRS ${UNIRTOS_EXTERNAL_APP_DIR})
+endif()
 set(EXTERNAL_APP_DEPEND_CONFIGS)
-foreach(external_app_dir ${EXTERNAL_QOS_APPLICATION_DIRS})
-    set(external_app_depend_config ${QOS_APPLICATIONS_DIR}/${external_app_dir}/depend.config)
-    if(EXISTS ${external_app_depend_config})
-        list(APPEND EXTERNAL_APP_DEPEND_CONFIGS ${external_app_depend_config})
-    endif()
-endforeach()
 
 
 message("toolchain.cmake=${QL_KERNEL_DIR}/${build_arch}/scripts/toolchain.cmake")
@@ -206,8 +221,7 @@ if(NOT MERGE_CHECK_CONFIG_RET EQUAL 0)
     message(FATAL_ERROR "Failed to generate check.config from system/modem config files")
 endif()
 
-# 2. Merge root .config with selected demo depend.config and external app depend.config fragments
-#    to form the build-time effective.config
+# 2. Initialize build-time effective.config from root .config directly.
 execute_process(
     COMMAND ${CMAKE_COMMAND} -E copy ${SRC_CONFIG} ${EFFECTIVE_CONFIG}
     WORKING_DIRECTORY ${UNIRTOS_DIR}
@@ -216,30 +230,6 @@ execute_process(
 if(NOT COPY_EFFECTIVE_CONFIG_RET EQUAL 0)
     message(FATAL_ERROR "Failed to initialize effective.config from root .config")
 endif()
-
-foreach(selected_app_demo_depend_config ${SELECTED_APP_DEMO_DEPEND_CONFIGS})
-    message("Merging selected demo depend config: ${selected_app_demo_depend_config}")
-    execute_process(
-        COMMAND ${py_exe} ${tools_dir}/python/merge_files.py ${EFFECTIVE_CONFIG} ${selected_app_demo_depend_config} ${EFFECTIVE_CONFIG}
-        WORKING_DIRECTORY ${UNIRTOS_DIR}
-        RESULT_VARIABLE MERGE_SELECTED_DEMO_CONFIG_RET
-    )
-    if(NOT MERGE_SELECTED_DEMO_CONFIG_RET EQUAL 0)
-        message(FATAL_ERROR "Failed to merge selected demo depend config: ${selected_app_demo_depend_config}")
-    endif()
-endforeach()
-
-foreach(external_app_depend_config ${EXTERNAL_APP_DEPEND_CONFIGS})
-    message("Merging external app depend config: ${external_app_depend_config}")
-    execute_process(
-        COMMAND ${py_exe} ${tools_dir}/python/merge_files.py ${EFFECTIVE_CONFIG} ${external_app_depend_config} ${EFFECTIVE_CONFIG}
-        WORKING_DIRECTORY ${UNIRTOS_DIR}
-        RESULT_VARIABLE MERGE_EFFECTIVE_CONFIG_RET
-    )
-    if(NOT MERGE_EFFECTIVE_CONFIG_RET EQUAL 0)
-        message(FATAL_ERROR "Failed to merge external app depend config: ${external_app_depend_config}")
-    endif()
-endforeach()
 
 # 3. Check effective.config is within check.config capability range
 execute_process(
