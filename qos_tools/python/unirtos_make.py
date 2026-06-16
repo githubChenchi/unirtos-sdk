@@ -190,7 +190,6 @@ def build_environment(toolchain_root: Path, config: BuildConfig, arch: str):
     env["build_arch"] = arch
     env["build_version"] = config.version
     env["build_tasknum"] = config.build_tasknum
-    env["unirtos_csdk_build"] = "y"
     env["COMPILER_PATH"] = compiler_path
     env["COMPILER_AS"] = f"{compiler_bin}/arm-none-eabi-as.exe"
     env["COMPILER_CC"] = f"{compiler_bin}/arm-none-eabi-gcc.exe"
