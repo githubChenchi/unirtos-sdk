@@ -137,6 +137,12 @@ if(DEFINED UNIRTOS_EXTERNAL_APP_DIR)
     endif()
 endif()
 
+if(DEFINED UNIRTOS_EXTERNAL_APP_DIR)
+    message(STATUS "[build-mode] external-app")
+else()
+    message(STATUS "[build-mode] builtin-demo")
+endif()
+
 # =========================================================================
 # External Libraries Support (SDK-integrated build)
 # =========================================================================
@@ -272,15 +278,38 @@ set(TARGET_CONFIG ${BINARY_TOP_DIR}/target.config)
 set(CHECK_CONFIG ${BINARY_TOP_DIR}/check.config)
 set(KCONFIG_MODEM ${QL_COMPONENTS_DIR}/system/modem/Kconfig.modem)
 set(QOS_APPLICATIONS_DIR ${QL_DEMO_DIR})
-# Independent external app flow does not rely on builtin demo manifest/depend mechanism.
+# Builtin demo selection/depend merge is only enabled in builtin mode.
 set(SELECTED_APP_DEMO_DEPEND_CONFIGS)
 set(SELECTED_APP_DEMO_CONFIGURE_DEPENDS)
+if(NOT DEFINED UNIRTOS_EXTERNAL_APP_DIR)
+    set(APP_INIT_ENTRIES ${QOS_APPLICATIONS_DIR}/app_init/apps_init_entries.def)
+    resolve_builtin_demo_selection(
+        ${QOS_APPLICATIONS_DIR}
+        ${APP_INIT_ENTRIES}
+        ${build_arch}
+        ${BINARY_TOP_DIR}/qos_applications
+        ${py_exe}
+        ${tools_dir}
+        ${UNIRTOS_DIR}
+    )
+endif()
 
 collect_qos_application_projects(${QOS_APPLICATIONS_DIR} EXTERNAL_QOS_APPLICATION_DIRS)
 if(DEFINED UNIRTOS_EXTERNAL_APP_DIR)
     list(APPEND EXTERNAL_QOS_APPLICATION_DIRS ${UNIRTOS_EXTERNAL_APP_DIR})
 endif()
 set(EXTERNAL_APP_DEPEND_CONFIGS)
+foreach(external_app_dir ${EXTERNAL_QOS_APPLICATION_DIRS})
+    if(IS_ABSOLUTE ${external_app_dir})
+        set(external_app_depend_config ${external_app_dir}/depend.config)
+    else()
+        set(external_app_depend_config ${QOS_APPLICATIONS_DIR}/${external_app_dir}/depend.config)
+    endif()
+
+    if(EXISTS ${external_app_depend_config})
+        list(APPEND EXTERNAL_APP_DEPEND_CONFIGS ${external_app_depend_config})
+    endif()
+endforeach()
 
 
 message("toolchain.cmake=${QL_KERNEL_DIR}/${build_arch}/scripts/toolchain.cmake")
@@ -337,7 +366,9 @@ if(NOT MERGE_CHECK_CONFIG_RET EQUAL 0)
     message(FATAL_ERROR "Failed to generate check.config from system/modem config files")
 endif()
 
-# 2. Initialize build-time effective.config from root .config directly.
+# 2. Initialize build-time effective.config from root .config directly,
+#    then merge selected demo depend.config (builtin mode) and
+#    external app depend.config fragments (if present).
 execute_process(
     COMMAND ${CMAKE_COMMAND} -E copy ${SRC_CONFIG} ${EFFECTIVE_CONFIG}
     WORKING_DIRECTORY ${UNIRTOS_DIR}
@@ -346,6 +377,30 @@ execute_process(
 if(NOT COPY_EFFECTIVE_CONFIG_RET EQUAL 0)
     message(FATAL_ERROR "Failed to initialize effective.config from root .config")
 endif()
+
+foreach(selected_app_demo_depend_config ${SELECTED_APP_DEMO_DEPEND_CONFIGS})
+    message("Merging selected demo depend config: ${selected_app_demo_depend_config}")
+    execute_process(
+        COMMAND ${py_exe} ${tools_dir}/python/merge_files.py ${EFFECTIVE_CONFIG} ${selected_app_demo_depend_config} ${EFFECTIVE_CONFIG}
+        WORKING_DIRECTORY ${UNIRTOS_DIR}
+        RESULT_VARIABLE MERGE_SELECTED_DEMO_CONFIG_RET
+    )
+    if(NOT MERGE_SELECTED_DEMO_CONFIG_RET EQUAL 0)
+        message(FATAL_ERROR "Failed to merge selected demo depend config: ${selected_app_demo_depend_config}")
+    endif()
+endforeach()
+
+foreach(external_app_depend_config ${EXTERNAL_APP_DEPEND_CONFIGS})
+    message("Merging external app depend config: ${external_app_depend_config}")
+    execute_process(
+        COMMAND ${py_exe} ${tools_dir}/python/merge_files.py ${EFFECTIVE_CONFIG} ${external_app_depend_config} ${EFFECTIVE_CONFIG}
+        WORKING_DIRECTORY ${UNIRTOS_DIR}
+        RESULT_VARIABLE MERGE_EFFECTIVE_CONFIG_RET
+    )
+    if(NOT MERGE_EFFECTIVE_CONFIG_RET EQUAL 0)
+        message(FATAL_ERROR "Failed to merge external app depend config: ${external_app_depend_config}")
+    endif()
+endforeach()
 
 # 3. Check effective.config is within check.config capability range
 execute_process(
